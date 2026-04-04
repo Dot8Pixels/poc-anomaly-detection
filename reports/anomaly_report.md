@@ -1,30 +1,35 @@
-# Publication Periodicity Report
-Generated on: 2026-04-04 23:07:58
+# Liveness & Expectation Report
+Generated on: 2026-04-04 23:19:49
 
-## Monitoring Criteria
-- **App Number, RIC, FID**: Tracked as unique publication streams.
-- **Period Detection**: Monitoring Max Gap between messages.
-- **Value Check**: Skipped (Liveness only).
+## Learned Profile Criteria
+- **Dynamic Baseline**: The system learned which Hours each App/RIC/FID is supposed to be active.
+- **Criteria**: App Number, RIC Name, FID Name.
+- **Expectation**: If a stream was active during an hour in the baseline, it is required to publish every minute.
 
 ## Summary
-- **Total Windows Analyzed:** 6,440
-- **Periodicity Anomalies Found:** 2,287
+- **Total Expected Windows:** 5,360
+- **Missing Publications Detected:** 1,086
 
-## Sample Period Anomalies (Missing/Delayed Publication)
-| App | RIC | FID | Window Start | Max Gap (sec) | Normal Gap (sec) | Status |
-|-----|-----|-----|--------------|---------------|------------------|--------|
-| 101 | TRI.N | LAST | 2026-04-01 10:31:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:32:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:33:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:34:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:35:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:36:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:37:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:38:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:39:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:40:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:41:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:42:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:43:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:44:00 | 60.0 | 0.0 | SILENCE |
-| 101 | TRI.N | LAST | 2026-04-01 10:45:00 | 60.0 | 0.0 | SILENCE |
+## Sample Missing Data (Data should have published but did not)
+| App | RIC | FID | Expected Hour | Window Missing | Status |
+|-----|-----|-----|---------------|----------------|--------|
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:02:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:03:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:04:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:05:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:06:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:07:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:08:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:09:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:10:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:11:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:12:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:13:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:14:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:15:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:16:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:17:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:18:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:19:00 | MISSING |
+| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:20:00 | MISSING |
+| 101 | TRI.N | LAST | 14:00 | 2026-04-01 14:44:00 | MISSING |

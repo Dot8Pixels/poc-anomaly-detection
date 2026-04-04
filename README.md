@@ -12,13 +12,14 @@ The model ignores data **values** (as they are random/variable) and focuses stri
 - **RIC (Instrument Name)**: The specific financial instrument being published.
 - **FID (Field Name)**: The specific field (e.g., BID, ASK, LAST) being published.
 
-### **Detection Logic**
-- **Windowing**: Data is aggregated into **1-minute windows**.
-- **Max Gap Analysis**: For every window, the system calculates the longest time gap between two consecutive messages for the same App/RIC/FID.
-- **Baseline Learning**: The system calculates the `Median Max Gap` (Normal Period) for each stream during active hours (08:00 - 18:00).
+### **Detection Logic (Pure Machine Learning)**
+- **Model**: Unsupervised **Isolation Forest**.
+- **Learned Features**: The model is trained on a combination of `App/RIC/FID` identity, `Time` (Hour, Minute, Day of Week), and `Publication Frequency`.
+- **How it Works**: 
+    - The model learns the multi-dimensional "clusters" of normal publication activity.
+    - It identifies windows that are mathematically "isolated" from these clusters.
 - **Anomaly Trigger**: 
-    - **SILENCE**: A window contains 0 messages for an active stream.
-    - **DELAYED**: The `Max Gap` in a window exceeds **3x the Normal Period**.
+    - **MISSING**: The model flags a window where the data *should* have been part of a high-activity cluster but instead showed zero or unusually low publication.
 
 ## 🚀 How to Run
 

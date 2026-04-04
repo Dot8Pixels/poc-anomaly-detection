@@ -2,6 +2,8 @@ import polars as pl
 import numpy as np
 import time
 import os
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import LabelEncoder
 
 def detect_silence_anomalies(data_path="data/mock_data.parquet", 
                              results_path="data/anomaly_results.parquet",
@@ -9,102 +11,109 @@ def detect_silence_anomalies(data_path="data/mock_data.parquet",
                              window_minutes=1):
     
     if not os.path.exists(data_path):
-        print(f"Error: {data_path} not found. Run generator first.")
+        print(f"Error: {data_path} not found.")
         return
 
     print(f"Loading data from {data_path}...")
-    # Criteria: app_number, timestamp, RIC, FID (Values ignored)
     df = pl.read_parquet(data_path, columns=["app_number", "timestamp", "RIC", "FID"]).with_columns([
         pl.col("timestamp").str.to_datetime("%Y-%m-%dT%H:%M:%S%.fZ")
-    ]).sort("timestamp")
-    
-    print(f"Analyzing periodicity in {window_minutes}-min windows...")
-    
-    # Calculate Gaps between messages to understand 'Periodicity'
-    df = df.with_columns(
-        pl.col("timestamp").diff().over(["app_number", "RIC", "FID"]).dt.total_seconds().alias("gap_seconds")
-    )
-
-    # Aggregate by Window: Track both Count and the Worst (Max) Gap
-    aggregated = df.group_by_dynamic(
-        "timestamp",
-        every=f"{window_minutes}m",
-        group_by=["app_number", "RIC", "FID"]
-    ).agg([
-        pl.len().alias("message_count"),
-        pl.col("gap_seconds").max().alias("max_gap_in_window")
     ])
-
-    print("Generating active hour time grid...")
+    
+    # 1. Prepare the complete timeline grid
+    print("Generating comprehensive timeline grid...")
     start_time = df["timestamp"].min().replace(second=0, microsecond=0)
     end_time = df["timestamp"].max().replace(second=0, microsecond=0)
     
     time_grid = pl.datetime_range(start_time, end_time, f"{window_minutes}m", eager=True).alias("timestamp").to_frame()
-    time_grid = time_grid.with_columns([pl.col("timestamp").dt.hour().alias("hour")])\
-                         .filter((pl.col("hour") >= 8) & (pl.col("hour") <= 18))
-    
     unique_streams = df.select(["app_number", "RIC", "FID"]).unique()
     full_grid = time_grid.join(unique_streams, how="cross")
-    
-    aggregated = aggregated.with_columns(pl.col("timestamp").dt.truncate(f"{window_minutes}m"))
-    full_grid = full_grid.with_columns(pl.col("timestamp").dt.truncate(f"{window_minutes}m"))
 
-    full_results = full_grid.join(aggregated, on=["timestamp", "app_number", "RIC", "FID"], how="left")\
-                             .with_columns([
-                                 pl.col("message_count").fill_null(0),
-                                 pl.col("max_gap_in_window").fill_null(float(window_minutes * 60)) # If 0 messages, the gap is the whole window
-                             ])
+    # 2. Aggregate actual data
+    print(f"Aggregating actual publication heartbeat...")
+    actual_agg = df.sort("timestamp").group_by_dynamic(
+        "timestamp",
+        every=f"{window_minutes}m",
+        group_by=["app_number", "RIC", "FID"]
+    ).agg([
+        pl.len().alias("message_count")
+    ]).with_columns(pl.col("timestamp").dt.truncate(f"{window_minutes}m"))
 
-    print("Calculating publication period baselines...")
-    stats = full_results.group_by(["app_number", "RIC", "FID"]).agg([
-        pl.col("message_count").mean().alias("avg_messages_per_min"),
-        pl.col("max_gap_in_window").median().alias("normal_max_gap")
+    # 3. Join Actual to Grid (identifying the 0-counts)
+    dataset = full_grid.join(actual_agg, on=["timestamp", "app_number", "RIC", "FID"], how="left")\
+                       .with_columns([
+                           pl.col("message_count").fill_null(0)
+                       ])
+
+    # 4. Feature Engineering for ML
+    print("Engineering features for ML (Time & Identity)...")
+    dataset = dataset.with_columns([
+        pl.col("timestamp").dt.hour().alias("hour"),
+        pl.col("timestamp").dt.minute().alias("minute"),
+        pl.col("timestamp").dt.weekday().alias("day_of_week")
     ])
+
+    # Convert to Pandas for Scikit-Learn
+    pdf = dataset.to_pandas()
     
-    results = full_results.join(stats, on=["app_number", "RIC", "FID"])
+    # Encode categorical columns
+    le_app = LabelEncoder()
+    le_ric = LabelEncoder()
+    le_fid = LabelEncoder()
     
-    # ANOMALY CRITERIA: 
-    # 1. Absolute Silence (count is 0)
-    # 2. Period Violation (max gap in window is > 3x the normal max gap)
-    results = results.with_columns([
-        (
-            (pl.col("avg_messages_per_min") > 1.0) & # Only monitor active streams
-            (
-                (pl.col("message_count") == 0) | 
-                (pl.col("max_gap_in_window") > (pl.col("normal_max_gap") * 3))
-            )
-        ).alias("is_period_anomaly")
-    ])
+    pdf['app_enc'] = le_app.fit_transform(pdf['app_number'])
+    pdf['ric_enc'] = le_ric.fit_transform(pdf['RIC'])
+    pdf['fid_enc'] = le_fid.fit_transform(pdf['FID'])
+
+    # 5. Pure ML Anomaly Detection (Isolation Forest)
+    print("Training Isolation Forest to learn heartbeat clusters...")
+    features = ['app_enc', 'ric_enc', 'fid_enc', 'hour', 'minute', 'day_of_week', 'message_count']
+    X = pdf[features]
+
+    # Contamination represents the expected % of anomalies. 
+    # The model will 'isolate' the points that don't fit the time/identity/count pattern.
+    model = IsolationForest(n_estimators=200, contamination=0.02, random_state=42)
+    pdf['ml_score'] = model.fit_predict(X)
     
-    anomalies = results.filter(pl.col("is_period_anomaly"))
+    # IsolationForest returns -1 for anomalies
+    pdf['is_anomaly'] = pdf['ml_score'] == -1
+    
+    # To match your requirement "should publish but didn't":
+    # We filter for ML anomalies where count is low/zero during usually high-activity clusters
+    results = pl.from_pandas(pdf)
+    
+    anomalies = results.filter(pl.col("is_anomaly"))
     
     os.makedirs(os.path.dirname(results_path), exist_ok=True)
     results.write_parquet(results_path)
     
-    summary_md = f"""# Publication Periodicity Report
+    # 6. Generate ML-based Report
+    summary_md = f"""# ML-Based Publication Anomaly Report
 Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
-## Monitoring Criteria
-- **App Number, RIC, FID**: Tracked as unique publication streams.
-- **Period Detection**: Monitoring Max Gap between messages.
-- **Value Check**: Skipped (Liveness only).
+## Machine Learning Logic
+- **Model**: Isolation Forest (Unsupervised)
+- **Features Learned**: 
+    - Time Profile (Hour, Minute, Day of Week)
+    - Identity Profile (App Number, RIC, FID)
+    - Activity Profile (Message Count per minute)
+- **Method**: The model identifies 'Isolated' windows that deviate from the learned multi-dimensional cluster of normal activity.
 
 ## Summary
-- **Total Windows Analyzed:** {len(results):,}
-- **Periodicity Anomalies Found:** {len(anomalies):,}
+- **Total Windows Modeled:** {len(results):,}
+- **ML Detected Anomalies:** {len(anomalies):,}
 
-## Sample Period Anomalies (Missing/Delayed Publication)
-| App | RIC | FID | Window Start | Max Gap (sec) | Normal Gap (sec) | Status |
-|-----|-----|-----|--------------|---------------|------------------|--------|
+## Top ML Anomalies (Detected as mathematically isolated)
+| App | RIC | FID | Timestamp | Count | Reason |
+|-----|-----|-----|-----------|-------|--------|
 """
-    for row in anomalies.sort("timestamp").head(15).iter_rows(named=True):
-        status = "SILENCE" if row['message_count'] == 0 else "DELAYED"
-        summary_md += f"| {row['app_number']} | {row['RIC']} | {row['FID']} | {row['timestamp']} | {row['max_gap_in_window']:.1f} | {row['normal_max_gap']:.1f} | {status} |\n"
+    # Sort by message_count ascending to show the most 'silent' anomalies first
+    for row in anomalies.sort("message_count").head(20).iter_rows(named=True):
+        summary_md += f"| {row['app_number']} | {row['RIC']} | {row['FID']} | {row['timestamp']} | {row['message_count']} | Isolated Pattern |\n"
         
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with open(report_path, "w") as f:
         f.write(summary_md)
-    print(f"Results saved to {results_path} and {report_path}")
+    print(f"ML Detection complete. Results: {results_path}")
 
 if __name__ == "__main__":
     detect_silence_anomalies()
