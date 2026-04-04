@@ -16,9 +16,9 @@ instruments:
   FIDs:
     LAST: { min: 100.0, max: 1500.0, type: "float" }
 
-# Anomalies
+# Anomalies - Rare events (approx 1-2 per day)
 anomalies:
-  probability: 0.01
+  probability: 0.00005
   types:
     - name: "silence"
-      duration_minutes: 10
+      duration_minutes: 20
