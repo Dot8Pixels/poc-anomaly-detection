@@ -1,25 +1,38 @@
 # Anomaly Detection for Application Publication (Liveness & Periodicity)
 
-This application is designed to monitor the publication "heartbeat" of multiple apps. It detects anomalies based on the **periodicity** of data publication to ensure that expected data is arriving consistently.
+This application is designed to monitor the publication "heartbeat" of multiple apps. It uses **Unsupervised Machine Learning** to detect anomalies where data should have been published but was not, based on unique historical patterns for each application.
 
 ## 📌 Project Purpose
-In a real-time environment, applications publish data (RICs and FIDs) to a database. If an application stops publishing or lags significantly, it indicates a failure. This tool establishes a baseline of "normal" publication frequency and alerts when a "silence" or "delayed" period is detected.
+In real-time financial environments, applications publish data (RICs and FIDs) to a unified database. If an application stops publishing or its frequency drops significantly, it indicates a failure. This tool replaces manual thresholds with an AI model that learns exactly what "normal" looks like for every specific App, RIC, and FID.
 
 ## 🔍 Monitoring Criteria
-The model ignores data **values** (as they are random/variable) and focuses strictly on the following metadata:
-- **App Number**: The unique identifier for the source application.
-- **Timestamp**: Used to calculate the gap (period) between publications.
-- **RIC (Instrument Name)**: The specific financial instrument being published.
-- **FID (Field Name)**: The specific field (e.g., BID, ASK, LAST) being published.
+The model focuses strictly on metadata and ignores data **values**:
+- **Identity**: App Number, RIC (Instrument Name), FID (Field Name).
+- **Time Context**: Hour of day, Minute, and Day of the Week.
+- **Heartbeat**: The count of publications per 1-minute window.
 
-### **Detection Logic (Pure Machine Learning)**
-- **Model**: Unsupervised **Isolation Forest**.
-- **Learned Features**: The model is trained on a combination of `App/RIC/FID` identity, `Time` (Hour, Minute, Day of Week), and `Publication Frequency`.
-- **How it Works**: 
-    - The model learns the multi-dimensional "clusters" of normal publication activity.
-    - It identifies windows that are mathematically "isolated" from these clusters.
-- **Anomaly Trigger**: 
-    - **MISSING**: The model flags a window where the data *should* have been part of a high-activity cluster but instead showed zero or unusually low publication.
+## 🧠 Model Detail: Isolation Forest
+The system utilizes a **Pure Machine Learning** approach (Isolation Forest) to detect "Missing Data" without hardcoded rules.
+
+### **How it Works**
+1.  **Zero-Fill Grid**: The system creates a full timeline of every minute for every App/RIC/FID. If no data arrived, it records a `0`. This "teaches" the model to recognize silence.
+2.  **Multi-Dimensional Clustering**: The model maps every minute into a high-dimensional space (Identity + Time + Frequency). 
+3.  **The "Isolation" Logic**: 
+    - **Normal Points**: Healthy publication minutes form dense "clusters" (e.g., App 101 usually has 130 messages at 10 AM). These are hard to separate from each other.
+    - **Anomalous Points**: A `0` count occurring when an app is usually busy is mathematically "isolated" from its normal cluster. The model can separate these points very quickly.
+4.  **Behavioral Learning**: Because `App Number` and `RIC` are features, the model learns a unique profile for each stream. It automatically knows that a `0` is normal for a batch app at noon, but highly suspicious for a real-time app.
+
+### **Advantages over Rules**
+- **Dynamic Thresholds**: No need to manually define "active hours" or "low counts."
+- **Pattern Recognition**: Automatically handles complex schedules (e.g., higher traffic on market open/close).
+- **Scalability**: Handles thousands of unique RICs and FIDs without manual configuration.
+
+## 💾 Model Export & Inference
+When the detector runs, it saves the learned "brain" to the `models/` directory:
+- `anomaly_model.joblib`: The trained Isolation Forest model.
+- `encoder_*.joblib`: Label encoders for App, RIC, and FID identities.
+
+Other applications (like a real-time monitor) can load these files to check if live data is healthy without needing to retrain. See `src/anomaly_detection/monitor.py` for a code example.
 
 ## 🚀 How to Run
 
@@ -33,33 +46,23 @@ Run the entire pipeline (Generate -> Detect -> Visualize) with a single command:
 uv run main.py
 ```
 
-### **Manual Steps**
-If you wish to run components individually:
-1. **Configure**: Edit `config/data_config.yaml` to change RICs, Apps, or Anomaly frequency.
-2. **Generate Data**: `uv run src/anomaly_detection/generator.py`
-3. **Run Detection**: `uv run src/anomaly_detection/detector.py`
-4. **Visualize**: `uv run src/anomaly_detection/visualizer.py`
-
 ## 📊 How to Read Reports
 All results are stored in the `reports/` directory:
 
-### **1. Text Summary (`reports/anomaly_report.md`)**
-- Provides a high-level count of how many periodicity violations were found.
-- Lists a sample table of anomalies including the **Max Gap** (in seconds) vs. the **Normal Gap**.
-- **Status "SILENCE"**: 0 messages arrived in that minute.
-- **Status "DELAYED"**: Messages arrived, but there was an unusually long pause between them.
+### **1. ML Summary Report (`reports/anomaly_report.md`)**
+- Lists windows that the ML model identified as **Isolated** (Anomalous).
+- Displays the **App**, **RIC**, and **Timestamp** of the failure.
+- **Reason "Isolated Pattern"**: Means the model expected activity based on historical time/identity clusters, but found a significant deviation (usually silence).
 
 ### **2. Interactive Visualizations (`reports/visualizations/`)**
-Open these `.html` files in any web browser:
-- **`timeseries_anomalies.html`**: A bar chart showing the **Max Gap** per minute.
-    - **Blue Bars**: Normal heartbeat.
-    - **Red Bars**: Periodicity/Silence anomaly.
-    - **Orange Line**: The calculated threshold (3x the normal period).
-- **`value_distribution.html`**: A scatter plot showing the relationship between message count and the maximum gap, helping to identify outliers.
+- **`timeseries_anomalies.html`**: A bar chart of publication frequency.
+    - **Blue Bars**: Normal clustered behavior.
+    - **Red Bars**: ML-detected missing or irregular publication periods.
+- **`value_distribution.html`**: A bar chart showing the total count of Normal vs. Missing slots per RIC.
 
 ## 📂 Project Structure
 - `config/`: Contains `data_config.yaml`.
-- `data/`: Stores raw and processed `.parquet` files (efficient for millions of rows).
+- `data/`: Stores raw and processed `.parquet` files.
 - `reports/`: Contains the Markdown report and Plotly HTML visualizations.
-- `src/anomaly_detection/`: The core Python package containing the logic.
+- `src/anomaly_detection/`: The core logic (Generator, Detector, Visualizer).
 - `main.py`: The root orchestrator script.
