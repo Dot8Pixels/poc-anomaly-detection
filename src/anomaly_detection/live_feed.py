@@ -18,10 +18,12 @@ Via main.py (recommended — runs both together):
     uv run main.py --simulate
 """
 
+import multiprocessing
 import os
 import random
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import polars as pl
 import yaml
@@ -36,7 +38,11 @@ def _load_config(path: str = CONFIG_PATH) -> dict:
         return yaml.safe_load(f)
 
 
-def run_live_feed(config_path: str = CONFIG_PATH, stop_after_seconds: float = 0):
+def run_live_feed(
+    config_path: str = CONFIG_PATH,
+    stop_after_seconds: float = 0,
+    dashboard_queue: Optional[multiprocessing.Queue] = None,
+):
     """
     Continuously emit publication events to the live feed parquet.
 
@@ -108,20 +114,47 @@ def run_live_feed(config_path: str = CONFIG_PATH, stop_after_seconds: float = 0)
                     until = now + timedelta(minutes=silence_duration_m)
                     silence_until[key] = until
                     label = f"App {app} | {ric} | {fid}"
-                    if label not in [l for l, _ in silenced_this_batch]:
+                    if label not in [lbl for lbl, _ in silenced_this_batch]:
                         silenced_this_batch.append((label, key))
+                    if dashboard_queue is not None:
+                        try:
+                            dashboard_queue.put_nowait(
+                                {
+                                    "type": "silence",
+                                    "app": app,
+                                    "ric": ric,
+                                    "fid": fid,
+                                    "duration_min": silence_duration_m,
+                                    "ts": now.strftime("%H:%M:%S"),
+                                }
+                            )
+                        except Exception:
+                            pass
                     continue
 
                 f_cfg = fids_cfg[fid]
-                new_rows.append(
-                    {
-                        "app_number": app,
-                        "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-                        "RIC": ric,
-                        "FID": fid,
-                        "value": round(random.uniform(f_cfg["min"], f_cfg["max"]), 2),
-                    }
-                )
+                row = {
+                    "app_number": app,
+                    "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+                    "RIC": ric,
+                    "FID": fid,
+                    "value": round(random.uniform(f_cfg["min"], f_cfg["max"]), 2),
+                }
+                new_rows.append(row)
+                if dashboard_queue is not None:
+                    try:
+                        dashboard_queue.put_nowait(
+                            {
+                                "type": "event",
+                                "app": app,
+                                "ric": ric,
+                                "fid": fid,
+                                "value": row["value"],
+                                "ts": now.strftime("%H:%M:%S"),
+                            }
+                        )
+                    except Exception:
+                        pass
 
             if new_rows:
                 all_rows.extend(new_rows)

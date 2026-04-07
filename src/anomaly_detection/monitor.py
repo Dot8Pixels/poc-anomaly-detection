@@ -23,9 +23,11 @@ Usage:
     python src/anomaly_detection/monitor.py   # live mode standalone
 """
 
+import multiprocessing
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import joblib
 import pandas as pd
@@ -194,6 +196,7 @@ def monitor_live(
     config_path: str = CONFIG_PATH,
     verbose: bool = False,
     stop_after_seconds: float = 0,
+    dashboard_queue: Optional[multiprocessing.Queue] = None,
 ):
     """
     Tail the live feed parquet and alert when a stream goes silent.
@@ -349,6 +352,31 @@ def monitor_live(
                     already_alerted.add(alert_key)
                     alert_total += 1
                     alerts_this_cycle += 1
+                    if dashboard_queue is not None:
+                        ls = last_seen.get(stream)
+                        silent_for = None
+                        if ls:
+                            diff = int(
+                                (datetime.now(tz=timezone.utc) - ls).total_seconds()
+                            )
+                            m, s = divmod(diff, 60)
+                            silent_for = f"{m}m {s}s"
+                        try:
+                            dashboard_queue.put_nowait(
+                                {
+                                    "type": "alert",
+                                    "app": app,
+                                    "ric": ric,
+                                    "fid": fid,
+                                    "pub_count": pub_count,
+                                    "mean_count": round(stats.get("mean_count", 0)),
+                                    "score": round(score, 4),
+                                    "silent_for": silent_for,
+                                    "ts": check_window.strftime("%H:%M UTC"),
+                                }
+                            )
+                        except Exception:
+                            pass
                 elif verbose or pub_count > 0:
                     _ok(app, ric, fid, pub_count, check_window, score)
 
@@ -358,6 +386,28 @@ def monitor_live(
                     f"  ✅  All {healthy}/{len(all_streams)} active streams healthy "
                     f"this window."
                 )
+
+            # Push check summary to dashboard
+            if dashboard_queue is not None:
+                healthy = sum(1 for s in all_streams if window_counts.get(s, 0) > 0)
+                # streams that recovered this cycle (had alert before but OK now)
+                recovered = [
+                    f"{a}|{r}|{f}"
+                    for a, r, f in all_streams
+                    if window_counts.get((a, r, f), 0) > 0
+                ]
+                try:
+                    dashboard_queue.put_nowait(
+                        {
+                            "type": "check",
+                            "healthy": healthy,
+                            "total": len(all_streams),
+                            "recovered": recovered,
+                            "ts": datetime.now(tz=timezone.utc).strftime("%H:%M:%S"),
+                        }
+                    )
+                except Exception:
+                    pass
 
             # Stop condition
             if stop_after_seconds > 0:
