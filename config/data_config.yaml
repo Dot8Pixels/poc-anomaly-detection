@@ -2,17 +2,15 @@
 # TRAINING CONFIG  (uv run main.py --train)
 # Generates historical data to train the Isolation Forest model.
 # ──────────────────────────────────────────────────────────────
-num_days: 10
-events_per_day: 50000
+num_days: 30
 output_file: "data/mock_data.parquet"
 
 # Two applications publishing the same instruments
 app_numbers: [101, 102]
 
 time_settings:
-  start_time: "2026-04-01T08:00:00Z"
-  min_gap_seconds: 0.05   # very fast publisher
-  max_gap_seconds: 0.3
+  # Start at midnight so the full 24-hour hourly profile is captured
+  start_time: "2026-03-08T00:00:00Z"
 
 # Three RICs, two FIDs each — gives 6 unique streams per app = 12 total
 instruments:

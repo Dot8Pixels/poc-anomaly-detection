@@ -396,6 +396,11 @@ def monitor_live(
                     for a, r, f in all_streams
                     if window_counts.get((a, r, f), 0) > 0
                 ]
+                # per-stream pub counts for live-compare chart in Profile tab
+                stream_counts = {
+                    f"{a}|{r}|{f}": int(window_counts.get((a, r, f), 0))
+                    for a, r, f in all_streams
+                }
                 try:
                     dashboard_queue.put_nowait(
                         {
@@ -403,6 +408,7 @@ def monitor_live(
                             "healthy": healthy,
                             "total": len(all_streams),
                             "recovered": recovered,
+                            "stream_counts": stream_counts,
                             "ts": datetime.now(tz=timezone.utc).strftime("%H:%M:%S"),
                         }
                     )

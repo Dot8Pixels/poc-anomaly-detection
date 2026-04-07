@@ -35,12 +35,16 @@ Standalone (for dev / testing):
 import asyncio
 import json
 import multiprocessing
+import os
 from typing import Optional
 
+import joblib
+import pandas as pd
+import polars as pl
 import uvicorn
 import yaml
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 CONFIG_PATH = "config/data_config.yaml"
 
@@ -181,6 +185,7 @@ def _build_html(streams: list[tuple], cfg: dict) -> str:
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Anomaly Detection — Live Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   :root {{
     --bg:       #0d1117;
@@ -210,7 +215,7 @@ def _build_html(streams: list[tuple], cfg: dict) -> str:
   .conn-badge.offline {{ background: #3a1a1a; color: var(--red); }}
 
   /* ── layout ── */
-  .layout {{ display: grid; grid-template-columns: 1fr 340px; gap: 0; height: calc(100vh - 53px); }}
+  .layout {{ display: grid; grid-template-columns: 1fr 370px; gap: 0; height: calc(100vh - 53px); }}
 
   /* ── left panel ── */
   .left-panel {{ padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }}
@@ -279,12 +284,12 @@ def _build_html(streams: list[tuple], cfg: dict) -> str:
     overflow: hidden;
   }}
   .panel-tab {{
-    display: flex; border-bottom: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--border);
   }}
   .tab-btn {{
-    flex: 1; padding: 10px; font-size: 0.78rem; font-weight: 600;
+    flex: 1; padding: 7px 4px; font-size: 0.72rem; font-weight: 600;
     background: none; border: none; color: var(--muted); cursor: pointer;
-    border-bottom: 2px solid transparent;
+    border-bottom: 2px solid transparent; white-space: nowrap;
   }}
   .tab-btn.active {{ color: var(--blue); border-bottom-color: var(--blue); }}
   .panel-body {{ flex: 1; overflow-y: auto; padding: 10px; display: none; }}
@@ -319,6 +324,46 @@ def _build_html(streams: list[tuple], cfg: dict) -> str:
   .cfg-row:last-child {{ border-bottom: none; }}
   .cfg-row .k {{ color: var(--muted); }}
   .cfg-row .v {{ color: var(--text); font-weight: 500; }}
+
+  /* ── profile tab ── */
+  .profile-controls {{ display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }}
+  .profile-controls select {{
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; font-size: 0.75rem; flex: 1; min-width: 120px;
+  }}
+  .profile-controls button {{
+    background: var(--blue); color: #0d1117; border: none; border-radius: 6px;
+    padding: 5px 14px; font-size: 0.75rem; font-weight: 700; cursor: pointer;
+  }}
+  .chart-wrap {{
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; margin-bottom: 12px; position: relative;
+  }}
+  .chart-wrap h4 {{
+    font-size: 0.75rem; color: var(--muted); margin-bottom: 8px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em;
+  }}
+  .chart-wrap canvas {{ width: 100% !important; }}
+  .profile-stats-grid {{
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 12px;
+  }}
+  .pstat {{
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px;
+  }}
+  .pstat .pv {{ font-size: 1.1rem; font-weight: 700; color: var(--blue); }}
+  .pstat .pk {{ font-size: 0.68rem; color: var(--muted); margin-top: 1px; }}
+  #profile-placeholder {{
+    color: var(--muted); font-size: 0.78rem; text-align: center;
+    margin-top: 40px;
+  }}
+  .tf-btn-group {{ display: flex; gap: 6px; margin-bottom: 12px; }}
+  .tf-btn {{
+    flex: 1; padding: 5px 0; font-size: 0.72rem; font-weight: 600;
+    background: var(--surface); color: var(--muted);
+    border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+  }}
+  .tf-btn.active {{ background: var(--blue); color: #0d1117; border-color: var(--blue); }}
 
   /* scrollbar */
   ::-webkit-scrollbar {{ width: 6px; }}
@@ -379,6 +424,7 @@ def _build_html(streams: list[tuple], cfg: dict) -> str:
       <button class="tab-btn" onclick="showTab('alerts',this)">
         Alerts <span id="alert-badge">0</span>
       </button>
+      <button class="tab-btn" onclick="showTab('profile',this)">Train Profile</button>
       <button class="tab-btn" onclick="showTab('config',this)">Config</button>
     </div>
 
@@ -387,6 +433,41 @@ def _build_html(streams: list[tuple], cfg: dict) -> str:
     <div class="panel-body" id="tab-alerts">
       <div style="font-size:0.78rem;color:var(--muted);margin-bottom:8px;">Most recent alerts first.</div>
       <div id="alert-list"></div>
+    </div>
+
+    <div class="panel-body" id="tab-profile">
+      <div class="profile-controls">
+        <select id="prof-app"><option value="">App…</option></select>
+        <select id="prof-ric"><option value="">RIC…</option></select>
+        <select id="prof-fid"><option value="">FID…</option></select>
+        <button onclick="loadProfile()">Load</button>
+      </div>
+      <div id="profile-placeholder">← Select App / RIC / FID and click Load<br>to compare the training profile against live detections.</div>
+      <div id="profile-content" style="display:none">
+        <div class="tf-btn-group">
+          <button class="tf-btn" id="tf-daily"   onclick="setTimeframe('daily'  ,this)">Daily</button>
+          <button class="tf-btn" id="tf-weekly"  onclick="setTimeframe('weekly' ,this)">Weekly</button>
+          <button class="tf-btn active" id="tf-monthly" onclick="setTimeframe('monthly',this)">Monthly</button>
+        </div>
+        <div class="profile-stats-grid">
+          <div class="pstat"><div class="pv" id="ps-mean">—</div><div class="pk">Avg pub/min (train)</div></div>
+          <div class="pstat"><div class="pv" id="ps-p05">—</div><div class="pk">p05 pub/min</div></div>
+          <div class="pstat"><div class="pv" id="ps-p01">—</div><div class="pk">p01 pub/min</div></div>
+          <div class="pstat"><div class="pv" id="ps-zeros">—</div><div class="pk">Zero-min %</div></div>
+        </div>
+        <div class="chart-wrap">
+          <h4>Hourly Publication Profile (train avg pub/min by hour)</h4>
+          <canvas id="chart-hourly" height="160"></canvas>
+        </div>
+        <div class="chart-wrap">
+          <h4>pub/min Distribution (train data)</h4>
+          <canvas id="chart-hist" height="140"></canvas>
+        </div>
+        <div class="chart-wrap" id="live-compare-wrap" style="display:none">
+          <h4>Live detections this session vs train avg</h4>
+          <canvas id="chart-live" height="140"></canvas>
+        </div>
+      </div>
     </div>
 
     <div class="panel-body" id="tab-config">
@@ -496,6 +577,161 @@ function showTab(name, btn) {{
   }}
 }}
 
+// ── Profile tab ──
+const STREAMS_LIST = {stream_ids_js};
+let _hourlyChart = null;
+let _histChart   = null;
+let _liveChart   = null;
+let _liveData    = {{}}; // sid -> list of {{ts, pub_count}}
+let _currentSid  = null;
+let _timeframe   = 'monthly';
+
+function setTimeframe(tf, btn) {{
+  _timeframe = tf;
+  document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (_currentSid) loadProfile();
+}}
+
+// Populate dropdowns from known streams
+(function initDropdowns() {{
+  const appSel = document.getElementById('prof-app');
+  const ricSel = document.getElementById('prof-ric');
+  const fidSel = document.getElementById('prof-fid');
+  const apps = [...new Set(STREAMS_LIST.map(s => s.split('|')[0]))];
+  const rics = [...new Set(STREAMS_LIST.map(s => s.split('|')[1]))];
+  const fids = [...new Set(STREAMS_LIST.map(s => s.split('|')[2]))];
+  apps.forEach(a => appSel.add(new Option('App ' + a, a)));
+  rics.forEach(r => ricSel.add(new Option(r, r)));
+  fids.forEach(f => fidSel.add(new Option(f, f)));
+}})();
+
+function destroyChart(c) {{ if (c) {{ c.destroy(); }} return null; }}
+
+function loadProfile() {{
+  const app = document.getElementById('prof-app').value;
+  const ric = document.getElementById('prof-ric').value;
+  const fid = document.getElementById('prof-fid').value;
+  if (!app || !ric || !fid) {{ alert('Please select App, RIC and FID'); return; }}
+  _currentSid = app + '|' + ric + '|' + fid;
+
+  fetch('/api/profile?app=' + app + '&ric=' + encodeURIComponent(ric) + '&fid=' + encodeURIComponent(fid) + '&timeframe=' + _timeframe)
+    .then(r => r.json())
+    .then(d => {{
+      if (d.error) {{ alert(d.error); return; }}
+      document.getElementById('profile-placeholder').style.display = 'none';
+      document.getElementById('profile-content').style.display = '';
+
+      // Stats
+      document.getElementById('ps-mean').textContent  = d.mean_count.toFixed(1);
+      document.getElementById('ps-p05').textContent   = d.p05_count.toFixed(1);
+      document.getElementById('ps-p01').textContent   = d.p01_count.toFixed(1);
+      document.getElementById('ps-zeros').textContent = d.zero_pct.toFixed(1) + '%';
+
+      // Hourly chart
+      _hourlyChart = destroyChart(_hourlyChart);
+      const hCtx = document.getElementById('chart-hourly').getContext('2d');
+      _hourlyChart = new Chart(hCtx, {{
+        type: 'bar',
+        data: {{
+          labels: d.hourly.map(h => h.hour + ':00'),
+          datasets: [{{
+            label: 'avg pub/min',
+            data: d.hourly.map(h => h.avg),
+            backgroundColor: 'rgba(88,166,255,0.6)',
+            borderColor: '#58a6ff',
+            borderWidth: 1,
+          }}]
+        }},
+        options: {{
+          responsive: true,
+          plugins: {{ legend: {{ display: false }} }},
+          scales: {{
+            x: {{ ticks: {{ color: '#8b949e', font: {{ size: 9 }} }} , grid: {{ color: '#30363d' }} }},
+            y: {{ ticks: {{ color: '#8b949e', font: {{ size: 9 }} }} , grid: {{ color: '#30363d' }} }}
+          }}
+        }}
+      }});
+
+      // Distribution histogram
+      _histChart = destroyChart(_histChart);
+      const hiCtx = document.getElementById('chart-hist').getContext('2d');
+      _histChart = new Chart(hiCtx, {{
+        type: 'bar',
+        data: {{
+          labels: d.hist.map(b => b.bin),
+          datasets: [
+            {{
+              label: 'Normal',
+              data: d.hist.map(b => b.normal),
+              backgroundColor: 'rgba(63,185,80,0.55)',
+              borderColor: '#3fb950', borderWidth: 1,
+            }},
+            {{
+              label: 'Anomaly',
+              data: d.hist.map(b => b.anomaly),
+              backgroundColor: 'rgba(248,81,73,0.7)',
+              borderColor: '#f85149', borderWidth: 1,
+            }}
+          ]
+        }},
+        options: {{
+          responsive: true,
+          plugins: {{ legend: {{ labels: {{ color: '#e6edf3', font: {{ size: 9 }} }} }} }},
+          scales: {{
+            x: {{ stacked: false, ticks: {{ color: '#8b949e', font: {{ size: 8 }} }} , grid: {{ color: '#30363d' }} }},
+            y: {{ ticks: {{ color: '#8b949e', font: {{ size: 9 }} }} , grid: {{ color: '#30363d' }} }}
+          }}
+        }}
+      }});
+
+      // Live compare chart (if we already have live data for this sid)
+      refreshLiveChart();
+    }})
+    .catch(e => alert('Error loading profile: ' + e));
+}}
+
+function refreshLiveChart() {{
+  if (!_currentSid || !_liveData[_currentSid] || _liveData[_currentSid].length === 0) {{
+    document.getElementById('live-compare-wrap').style.display = 'none';
+    return;
+  }}
+  document.getElementById('live-compare-wrap').style.display = '';
+  const pts = _liveData[_currentSid];
+  const meanVal = parseFloat(document.getElementById('ps-mean').textContent) || 0;
+
+  _liveChart = destroyChart(_liveChart);
+  const ctx = document.getElementById('chart-live').getContext('2d');
+  _liveChart = new Chart(ctx, {{
+    type: 'line',
+    data: {{
+      labels: pts.map(p => p.ts),
+      datasets: [
+        {{
+          label: 'Live pub/min',
+          data: pts.map(p => p.pub_count),
+          borderColor: '#bc8cff', backgroundColor: 'rgba(188,140,255,0.12)',
+          borderWidth: 1.5, pointRadius: 2, tension: 0.3, fill: true,
+        }},
+        {{
+          label: 'Train avg',
+          data: pts.map(() => meanVal),
+          borderColor: '#58a6ff', borderDash: [4,3],
+          borderWidth: 1, pointRadius: 0,
+        }}
+      ]
+    }},
+    options: {{
+      responsive: true,
+      plugins: {{ legend: {{ labels: {{ color: '#e6edf3', font: {{ size: 9 }} }} }} }},
+      scales: {{
+        x: {{ ticks: {{ color: '#8b949e', font: {{ size: 8 }}, maxTicksLimit: 8 }} , grid: {{ color: '#30363d' }} }},
+        y: {{ ticks: {{ color: '#8b949e', font: {{ size: 9 }} }} , grid: {{ color: '#30363d' }} }}
+      }}
+    }}
+  }});
+}}
+
 // ── WebSocket ──
 function connect() {{
   const ws = new WebSocket("ws://" + location.host + "/ws");
@@ -554,6 +790,15 @@ function connect() {{
           if (state.streamState[s] !== "normal") setStreamState(s, "normal");
         }});
       }}
+      // Collect live pub counts for the profile compare chart
+      if (msg.stream_counts) {{
+        Object.entries(msg.stream_counts).forEach(([sid, cnt]) => {{
+          if (!_liveData[sid]) _liveData[sid] = [];
+          _liveData[sid].push({{ ts: msg.ts, pub_count: cnt }});
+          if (_liveData[sid].length > 120) _liveData[sid].shift();
+        }});
+        if (_currentSid) refreshLiveChart();
+      }}
       addLog("check",
         `<span class="log-ts">${{msg.ts}}</span>` +
         `✅ Check #${{state.checks}}  healthy=${{msg.healthy}}/${{msg.total}}`
@@ -584,6 +829,125 @@ async def index():
     fids = list(instr.get("FIDs", {}).keys())
     streams = [(a, r, f) for a in apps for r in rics for f in fids]
     return HTMLResponse(_build_html(streams, cfg))
+
+
+# ── Training profile API ──────────────────────────────────────────────────────
+
+_GAP_STATS_PATH = os.path.join("models", "gap_stats.joblib")
+_RESULTS_PATH = os.path.join("data", "anomaly_results.parquet")
+_HIST_BINS = 20  # number of bins for pub/min distribution
+
+
+@app.get("/api/profile")
+async def api_profile(app: str, ric: str, fid: str, timeframe: str = "monthly"):
+    """Return training baseline stats + hourly profile + pub/min histogram for one stream.
+
+    timeframe: 'daily' = last 1 day, 'weekly' = last 7 days, 'monthly' = all data (up to 30 days)
+    """
+    # ── load models ────────────────────────────────────────────────────────────
+    if not os.path.exists(_GAP_STATS_PATH):
+        return JSONResponse(
+            {"error": f"Gap-stats not found at {_GAP_STATS_PATH}. Run --train first."},
+            status_code=404,
+        )
+    if not os.path.exists(_RESULTS_PATH):
+        return JSONResponse(
+            {
+                "error": f"Anomaly results not found at {_RESULTS_PATH}. Run --train first."
+            },
+            status_code=404,
+        )
+
+    app_n = int(app)
+    gap_stats: pd.DataFrame = joblib.load(_GAP_STATS_PATH)
+
+    row = gap_stats[
+        (gap_stats["app_number"] == app_n)
+        & (gap_stats["RIC"] == ric)
+        & (gap_stats["FID"] == fid)
+    ]
+    if row.empty:
+        return JSONResponse(
+            {"error": f"No training stats for {app}|{ric}|{fid}"}, status_code=404
+        )
+    row = row.iloc[0]
+
+    mean_count = float(row["mean_count"])
+    p05_count = float(row["p05_count"])
+    p01_count = float(row["p01_count"])
+    zero_minutes = int(row["zero_minutes"])
+
+    # ── load anomaly results ─────────────────────────────────────────────────
+    df = pl.read_parquet(_RESULTS_PATH).filter(
+        (pl.col("app_number") == app_n)
+        & (pl.col("RIC") == ric)
+        & (pl.col("FID") == fid)
+    )
+
+    # Apply timeframe filter — slice to last N days of available data
+    _TF_DAYS = {"daily": 1, "weekly": 7, "monthly": 30}
+    days_back = _TF_DAYS.get(timeframe, 30)
+    if len(df) > 0:
+        max_ts = df["minute"].max()
+        cutoff = max_ts - pl.duration(days=days_back)  # type: ignore[operator]
+        df = df.filter(pl.col("minute") >= cutoff)
+
+    # Zero-minute percentage across training data
+    total_minutes = len(df)
+    zero_pct = (zero_minutes / total_minutes * 100.0) if total_minutes > 0 else 0.0
+
+    # ── hourly profile ────────────────────────────────────────────────────────
+    hourly_df = (
+        df.group_by("hour").agg(pl.col("pub_count").mean().alias("avg")).sort("hour")
+    )
+    # Fill all 24 hours (some may be missing in short training windows)
+    hourly_map = {
+        int(r["hour"]): float(r["avg"]) for r in hourly_df.iter_rows(named=True)
+    }
+    hourly = [{"hour": h, "avg": round(hourly_map.get(h, 0.0), 1)} for h in range(24)]
+
+    # ── pub/min distribution histogram ───────────────────────────────────────
+    counts_normal = df.filter(pl.col("is_anomaly") == False)["pub_count"].to_list()  # noqa: E712
+    counts_anomaly = df.filter(pl.col("is_anomaly") == True)["pub_count"].to_list()  # noqa: E712
+    all_counts = df["pub_count"].to_list()
+
+    if all_counts:
+        min_v = min(all_counts)
+        max_v = max(all_counts)
+        bin_width = max((max_v - min_v) / _HIST_BINS, 1)
+
+        def _bucket(v: float) -> int:
+            return min(int((v - min_v) / bin_width), _HIST_BINS - 1)
+
+        bin_norm = [0] * _HIST_BINS
+        bin_anom = [0] * _HIST_BINS
+        for v in counts_normal:
+            bin_norm[_bucket(v)] += 1
+        for v in counts_anomaly:
+            bin_anom[_bucket(v)] += 1
+
+        hist = [
+            {
+                "bin": f"{round(min_v + i * bin_width)}-{round(min_v + (i + 1) * bin_width)}",
+                "normal": bin_norm[i],
+                "anomaly": bin_anom[i],
+            }
+            for i in range(_HIST_BINS)
+        ]
+    else:
+        hist = []
+
+    return JSONResponse(
+        {
+            "mean_count": mean_count,
+            "p05_count": p05_count,
+            "p01_count": p01_count,
+            "zero_minutes": zero_minutes,
+            "zero_pct": round(zero_pct, 2),
+            "hourly": hourly,
+            "hist": hist,
+        }
+    )
 
 
 # ── run_dashboard entry point ────────────────────────────────────────────────
