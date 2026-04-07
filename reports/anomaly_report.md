@@ -1,35 +1,36 @@
-# Liveness & Expectation Report
-Generated on: 2026-04-04 23:19:49
+# Bucket-Count Publication Analysis
+Generated on: 2026-04-07 22:08:59
 
-## Learned Profile Criteria
-- **Dynamic Baseline**: The system learned which Hours each App/RIC/FID is supposed to be active.
-- **Criteria**: App Number, RIC Name, FID Name.
-- **Expectation**: If a stream was active during an hour in the baseline, it is required to publish every minute.
+## ML Strategy
+- **Feature**: `pub_count` — publications per 1-minute window (0 = silence).
+- **Grid**: Full timeline zero-filled so silent minutes appear explicitly.
+- **Goal**: Learn the normal publication frequency per App/RIC/FID/hour and flag deviations.
 
 ## Summary
-- **Total Expected Windows:** 5,360
-- **Missing Publications Detected:** 1,086
+- **Total 1-min Windows Analyzed:** 13,461
+- **Anomalous Windows:** 66
+- **Silent Windows (pub_count=0):** 9,226
 
-## Sample Missing Data (Data should have published but did not)
-| App | RIC | FID | Expected Hour | Window Missing | Status |
-|-----|-----|-----|---------------|----------------|--------|
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:02:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:03:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:04:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:05:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:06:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:07:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:08:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:09:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:10:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:11:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:12:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:13:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:14:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:15:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:16:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:17:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:18:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:19:00 | MISSING |
-| 101 | TRI.N | LAST | 13:00 | 2026-04-01 13:20:00 | MISSING |
-| 101 | TRI.N | LAST | 14:00 | 2026-04-01 14:44:00 | MISSING |
+## Top Anomalous Windows (Lowest Counts)
+| App | RIC | FID | Minute | Count | Score |
+|-----|-----|-----|--------|-------|-------|
+| 101 | TRI.N | LAST | 2026-04-06 12:27:00+00:00 | 60 | -1 |
+| 101 | TRI.N | LAST | 2026-04-05 08:42:00+00:00 | 73 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 15:13:00+00:00 | 83 | -1 |
+| 101 | TRI.N | LAST | 2026-04-05 10:53:00+00:00 | 96 | -1 |
+| 101 | TRI.N | LAST | 2026-04-05 10:33:00+00:00 | 104 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 15:33:00+00:00 | 112 | -1 |
+| 101 | TRI.N | LAST | 2026-04-04 16:20:00+00:00 | 121 | -1 |
+| 101 | TRI.N | LAST | 2026-04-05 09:02:00+00:00 | 130 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 12:47:00+00:00 | 135 | -1 |
+| 101 | TRI.N | LAST | 2026-04-07 16:18:00+00:00 | 168 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 16:19:00+00:00 | 174 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 13:58:00+00:00 | 175 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 09:22:00+00:00 | 179 | -1 |
+| 101 | TRI.N | LAST | 2026-04-05 15:25:00+00:00 | 180 | -1 |
+| 101 | TRI.N | LAST | 2026-04-05 08:11:00+00:00 | 185 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 15:59:00+00:00 | 186 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 08:44:00+00:00 | 187 | -1 |
+| 101 | TRI.N | LAST | 2026-04-04 16:13:00+00:00 | 188 | -1 |
+| 101 | TRI.N | LAST | 2026-04-06 15:04:00+00:00 | 188 | -1 |
+| 101 | TRI.N | LAST | 2026-04-05 15:56:00+00:00 | 189 | -1 |

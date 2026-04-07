@@ -1,109 +1,175 @@
-import polars as pl
-import numpy as np
-import time
 import os
+import time
+
 import joblib
+import numpy as np
+import polars as pl
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import LabelEncoder
 
-def detect_silence_anomalies(data_path="data/mock_data.parquet", 
-                             results_path="data/anomaly_results.parquet",
-                             report_path="reports/anomaly_report.md",
-                             model_dir="models",
-                             window_minutes=1):
-    
+
+def detect_silence_anomalies(
+    data_path="data/mock_data.parquet",
+    results_path="data/anomaly_results.parquet",
+    report_path="reports/anomaly_report.md",
+    model_dir="models",
+):
     if not os.path.exists(data_path):
         print(f"Error: {data_path} not found.")
         return
 
     print(f"Loading data from {data_path}...")
-    df = pl.read_parquet(data_path, columns=["app_number", "timestamp", "RIC", "FID"]).with_columns([
-        pl.col("timestamp").str.to_datetime("%Y-%m-%dT%H:%M:%S%.fZ")
-    ])
-    
-    print("Generating comprehensive timeline grid...")
-    start_time = df["timestamp"].min().replace(second=0, microsecond=0)
-    end_time = df["timestamp"].max().replace(second=0, microsecond=0)
-    time_grid = pl.datetime_range(start_time, end_time, f"{window_minutes}m", eager=True).alias("timestamp").to_frame()
-    unique_streams = df.select(["app_number", "RIC", "FID"]).unique()
-    full_grid = time_grid.join(unique_streams, how="cross")
+    df = pl.read_parquet(
+        data_path, columns=["app_number", "timestamp", "RIC", "FID"]
+    ).with_columns(
+        pl.col("timestamp").str.to_datetime(
+            "%Y-%m-%dT%H:%M:%S%.fZ", time_unit="us", time_zone="UTC"
+        )
+    )
 
-    print(f"Aggregating actual publication heartbeat...")
-    actual_agg = df.sort("timestamp").group_by_dynamic(
-        "timestamp",
-        every=f"{window_minutes}m",
-        group_by=["app_number", "RIC", "FID"]
-    ).agg([
-        pl.len().alias("message_count")
-    ]).with_columns(pl.col("timestamp").dt.truncate(f"{window_minutes}m"))
+    # ── 1. BUILD 1-MINUTE BUCKET GRID ──────────────────────────────────────────
+    # Truncate every timestamp to the minute, then count publications per
+    # (app, RIC, FID, minute).  A zero-count minute means silence.
+    print("Building 1-minute publication buckets...")
+    df = df.with_columns(pl.col("timestamp").dt.truncate("1m").alias("minute"))
 
-    dataset = full_grid.join(actual_agg, on=["timestamp", "app_number", "RIC", "FID"], how="left")\
-                       .with_columns([
-                           pl.col("message_count").fill_null(0)
-                       ])
+    counts = (
+        df.group_by(["app_number", "RIC", "FID", "minute"])
+        .agg(pl.len().alias("pub_count"))
+        .sort(["app_number", "RIC", "FID", "minute"])
+    )
 
-    print("Engineering features for ML...")
-    dataset = dataset.with_columns([
-        pl.col("timestamp").dt.hour().alias("hour"),
-        pl.col("timestamp").dt.minute().alias("minute"),
-        pl.col("timestamp").dt.weekday().alias("day_of_week")
-    ])
+    # Build a full grid: every combination × every minute in range
+    print("Zero-filling silent minutes...")
+    min_ts = df["minute"].min()
+    max_ts = df["minute"].max()
+    assert min_ts is not None and max_ts is not None
+    all_minutes = pl.DataFrame(
+        {
+            "minute": pl.datetime_range(
+                min_ts, max_ts, interval="1m", time_zone="UTC", eager=True
+            )
+        }
+    )
+    streams = counts.select(["app_number", "RIC", "FID"]).unique()
+    full_grid = streams.join(all_minutes, how="cross")
 
-    pdf = dataset.to_pandas()
-    
-    # 1. ENCODE AND SAVE ENCODERS
-    print("Encoding categories and saving artifacts...")
+    grid = (
+        full_grid.join(counts, on=["app_number", "RIC", "FID", "minute"], how="left")
+        .with_columns(pl.col("pub_count").fill_null(0))
+        .sort(["app_number", "RIC", "FID", "minute"])
+    )
+
+    # ── 2. FEATURE ENGINEERING ──────────────────────────────────────────────────
+    print("Engineering time-based features...")
+    grid = grid.with_columns(
+        [
+            pl.col("minute").dt.hour().alias("hour"),
+            pl.col("minute").dt.weekday().alias("day_of_week"),
+        ]
+    )
+
+    pdf = grid.to_pandas()
+
+    # ── 3. ENCODE IDENTITIES ────────────────────────────────────────────────────
+    print("Encoding application and instrument identities...")
     os.makedirs(model_dir, exist_ok=True)
-    
-    encoders = {}
-    for col in ['app_number', 'RIC', 'FID']:
+    for col in ["app_number", "RIC", "FID"]:
         le = LabelEncoder()
-        pdf[f'{col}_enc'] = le.fit_transform(pdf[col])
-        encoders[col] = le
-        # Save each encoder so other apps can map RIC names to the same numbers
+        pdf[f"{col}_enc"] = le.fit_transform(pdf[col])
         joblib.dump(le, os.path.join(model_dir, f"encoder_{col}.joblib"))
 
-    # 2. TRAIN AND SAVE MODEL
-    print("Training Isolation Forest...")
-    features = ['app_number_enc', 'RIC_enc', 'FID_enc', 'hour', 'minute', 'day_of_week', 'message_count']
+    # ── 4. TRAIN ISOLATION FOREST ───────────────────────────────────────────────
+    # Features: Identity + Time-of-day + Publication count per minute
+    # A silence (pub_count=0) at a normally busy time will be isolated.
+    print("Training Isolation Forest on bucket counts...")
+    features = [
+        "app_number_enc",
+        "RIC_enc",
+        "FID_enc",
+        "hour",
+        "day_of_week",
+        "pub_count",
+    ]
     X = pdf[features]
 
-    model = IsolationForest(n_estimators=200, contamination=0.02, random_state=42)
-    pdf['ml_score'] = model.fit_predict(X)
-    pdf['is_anomaly'] = pdf['ml_score'] == -1
-    
-    # Save the model
+    # contamination ≈ fraction of silence minutes we expect in 10 days.
+    # ~20-min silences / (10 days × 16 active hrs × 60 min) ≈ few per ~9600 minutes.
+    model = IsolationForest(n_estimators=200, contamination=0.005, random_state=42)
+    model.fit(X)
+
     joblib.dump(model, os.path.join(model_dir, "anomaly_model.joblib"))
-    print(f"Model and Encoders saved to {model_dir}/")
+    print(f"Model saved to {model_dir}/")
+
+    # ── 5. SAVE PER-STREAM COUNT STATISTICS ─────────────────────────────────────
+    print("Computing per-stream count statistics for alert context...")
+    # Only compute stats on non-zero minutes (normal activity)
+    active = pdf[pdf["pub_count"] > 0]
+    grp = active.groupby(["app_number", "RIC", "FID"])["pub_count"]
+    count_stats = grp.mean().rename("mean_count").reset_index()
+    count_stats = (
+        count_stats.merge(
+            grp.std().rename("std_count").reset_index(), on=["app_number", "RIC", "FID"]
+        )
+        .merge(
+            grp.quantile(0.05).rename("p05_count").reset_index(),
+            on=["app_number", "RIC", "FID"],
+        )
+        .merge(
+            grp.quantile(0.01).rename("p01_count").reset_index(),
+            on=["app_number", "RIC", "FID"],
+        )
+    )
+    # Also track total zero-minutes per stream
+    zero_counts = (
+        pdf[pdf["pub_count"] == 0]
+        .groupby(["app_number", "RIC", "FID"])
+        .size()
+        .rename("zero_minutes")
+        .reset_index()
+    )
+    count_stats = count_stats.merge(
+        zero_counts, on=["app_number", "RIC", "FID"], how="left"
+    )
+    count_stats["zero_minutes"] = count_stats["zero_minutes"].fillna(0).astype(int)
+    joblib.dump(count_stats, os.path.join(model_dir, "gap_stats.joblib"))
+    print(f"Count statistics saved to {model_dir}/gap_stats.joblib")
+
+    # ── 6. LABEL & SAVE RESULTS ─────────────────────────────────────────────────
+    pdf["ml_score"] = model.predict(X)
+    pdf["is_anomaly"] = pdf["ml_score"] == -1
 
     results = pl.from_pandas(pdf)
-    anomalies = results.filter(pl.col("is_anomaly"))
-    
-    os.makedirs(os.path.dirname(results_path), exist_ok=True)
     results.write_parquet(results_path)
-    
-    summary_md = f"""# ML-Based Publication Anomaly Report
-Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
-## Machine Learning Artifacts
-- **Model Path**: `{model_dir}/anomaly_model.joblib`
-- **Encoders**: Saved for App, RIC, and FID identity mapping.
+    anomalies = results.filter(pl.col("is_anomaly"))
+    summary_md = f"""# Bucket-Count Publication Analysis
+Generated on: {time.strftime("%Y-%m-%d %H:%M:%S")}
+
+## ML Strategy
+- **Feature**: `pub_count` — publications per 1-minute window (0 = silence).
+- **Grid**: Full timeline zero-filled so silent minutes appear explicitly.
+- **Goal**: Learn the normal publication frequency per App/RIC/FID/hour and flag deviations.
 
 ## Summary
-- **Total Windows Modeled:** {len(results):,}
-- **ML Detected Anomalies:** {len(anomalies):,}
+- **Total 1-min Windows Analyzed:** {len(results):,}
+- **Anomalous Windows:** {len(anomalies):,}
+- **Silent Windows (pub_count=0):** {int(results.filter(pl.col("pub_count") == 0)["pub_count"].len()):,}
 
-## Top ML Anomalies
-| App | RIC | FID | Timestamp | Count |
-|-----|-----|-----|-----------|-------|
+## Top Anomalous Windows (Lowest Counts)
+| App | RIC | FID | Minute | Count | Score |
+|-----|-----|-----|--------|-------|-------|
 """
-    for row in anomalies.sort("message_count").head(20).iter_rows(named=True):
-        summary_md += f"| {row['app_number']} | {row['RIC']} | {row['FID']} | {row['timestamp']} | {row['message_count']} |\n"
-        
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    for row in anomalies.sort("pub_count").head(20).iter_rows(named=True):
+        summary_md += (
+            f"| {row['app_number']} | {row['RIC']} | {row['FID']} "
+            f"| {row['minute']} | {row['pub_count']} | {row['ml_score']} |\n"
+        )
+
     with open(report_path, "w") as f:
         f.write(summary_md)
-    print(f"ML Detection complete. Results: {results_path}")
+    print(f"Baseline analysis complete. Report: {report_path}")
+
 
 if __name__ == "__main__":
     detect_silence_anomalies()
