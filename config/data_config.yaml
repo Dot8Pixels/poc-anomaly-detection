@@ -1,24 +1,56 @@
-# Mock Data Configuration
+# ──────────────────────────────────────────────────────────────
+# TRAINING CONFIG  (uv run main.py --train)
+# Generates historical data to train the Isolation Forest model.
+# ──────────────────────────────────────────────────────────────
 num_days: 10
-events_per_day: 100000
+events_per_day: 50000
 output_file: "data/mock_data.parquet"
 
-# SINGLE APP and SINGLE RIC for testing the heartbeat
-app_numbers: [101]
+# Two applications publishing the same instruments
+app_numbers: [101, 102]
+
 time_settings:
   start_time: "2026-04-01T08:00:00Z"
-  min_gap_seconds: 0.1
-  max_gap_seconds: 0.5
+  min_gap_seconds: 0.05   # very fast publisher
+  max_gap_seconds: 0.3
 
-# Instruments and Data
+# Three RICs, two FIDs each — gives 6 unique streams per app = 12 total
 instruments:
-  RICs: ["TRI.N"]
+  RICs: ["TRI.N", "AAPL.O", "MSFT.O"]
   FIDs:
-    LAST: { min: 100.0, max: 1500.0, type: "float" }
+    LAST:  { min: 100.0,  max: 1500.0, type: "float" }
+    BID:   { min:  99.0,  max: 1499.0, type: "float" }
 
-# Anomalies - Rare events (approx 1-2 per day)
+# Rare silence anomalies injected during training (so the model sees them)
 anomalies:
-  probability: 0.00005
+  probability: 0.00003
   types:
     - name: "silence"
       duration_minutes: 20
+
+# ──────────────────────────────────────────────────────────────
+# LIVE SIMULATION CONFIG  (uv run main.py --simulate)
+# Controls the live_feed publisher and the monitor check interval.
+# ──────────────────────────────────────────────────────────────
+live_feed:
+  output_file: "data/live_feed.parquet"
+
+  # How fast to emit events (real seconds between batches)
+  batch_interval_seconds: 1.0
+
+  # How many events per batch (simulates ~N msgs/sec)
+  events_per_batch: 30
+
+  # Probability of triggering a silence on each batch
+  silence_probability: 0.005
+
+  # How long each silence lasts (simulated minutes)
+  silence_duration_minutes: 5
+
+monitor:
+  # How often the monitor wakes up and checks each stream (real seconds)
+  check_interval_seconds: 5
+
+  # A stream is considered "overdue" if it has published nothing in this
+  # many simulated minutes during an expected-active window
+  alert_after_silent_minutes: 2
